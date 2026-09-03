@@ -20,7 +20,7 @@ QNH_ESTANDAR_INHG = 29.92
 # complétalo con flaps / potencia / Vr según el POH antes de usarlo
 # en vuelo real.
 CONFIG_TEXT_DISPLAY = {
-    "Despegue": "[COMPLETAR SEGÚN POH] Flaps ___°, Potencia Máxima, Vr ___ KIAS.",
+    "Despegue": "[COMPLETAR SEGÚN POH] Flaps__°, Pot. Máxima, Vr__KIAS.",
     "Aterrizaje": "Flaps 30°, Motor Cortado, Frenado Máximo, App 71 KIAS.",
 }
 
@@ -287,109 +287,140 @@ def calcular_resultado(fase, altitud, temperatura, dir_viento, vel_viento, rumbo
 
 
 # ==========================================
-# 4. GENERACIÓN DE PDF
+# 4. GENERACIÓN DE PDF COMBINADO (Despegue + Aterrizaje en una sola hoja horizontal)
 # ==========================================
-def generar_pdf(fase, alt, temp, dir_v, vel_v, rwy, sup, r):
-    gr_b, tot_b = r['gr_base'], r['total_base']
-    gr_v, tot_v = r['gr_viento'], r['total_viento']
-    gr_f, tot_f = r['gr_final'], r['total_final']
+ALTURA_BLOQUE_VACIO = 92  # mm — alto de referencia para la caja "NO CALCULADO"
+
+
+def _cell_texto_ajustado(pdf, ancho, alto, texto, tam_max=7.5, tam_min=5.5):
+    """Escribe una celda de texto reduciendo el tamaño de letra si no entra en el ancho dado,
+    para evitar que el texto se desborde hacia la columna vecina."""
+    tam = tam_max
+    pdf.set_font("Arial", '', tam)
+    while pdf.get_string_width(texto) > ancho - 2 and tam > tam_min:
+        tam -= 0.5
+        pdf.set_font("Arial", '', tam)
+    pdf.cell(ancho, alto, texto, border=1, ln=True)
+
+
+def _dibujar_bloque_fase(pdf, nombre_fase, fase, r, x, y, ancho):
+    """Dibuja la caja de una fase (DESPEGUE/ATERRIZAJE) en la posición x,y del PDF combinado.
+    Si r es None, dibuja una caja con 'NO CALCULADO' en rojo en su lugar.
+    """
+    pdf.set_xy(x, y)
+    pdf.set_font("Arial", 'B', 12)
+    pdf.set_x(x)
+    pdf.cell(ancho, 8, f"CONDICIONES DE {nombre_fase}", border=1, align='C', ln=True)
+
+    if r is None:
+        pdf.set_x(x)
+        pdf.set_font("Arial", 'B', 16)
+        pdf.set_text_color(200, 0, 0)
+        pdf.cell(ancho, ALTURA_BLOQUE_VACIO - 8, "NO CALCULADO", border=1, align='C')
+        pdf.set_text_color(0, 0, 0)
+        return
+
     hw, cw = r['headwind'], r['crosswind']
-    porc_v_gr, porc_v_tot = r['porc_v_gr'], r['porc_v_tot']
-    val_v_gr, val_v_tot = r['val_v_gr'], r['val_v_tot']
-    diff_pasto = r['diff_pasto']
-    m_gr, m_tot = r['m_gr'], r['m_tot']
-    elevacion_campo, qnh = r['elevacion_campo'], r['qnh']
-
     tipo_viento_txt = "Viento frontal" if hw >= 0 else "Viento de cola"
+    operador = "-" if hw >= 0 else "+"
 
-    pdf = FPDF()
+    campos = [
+        ("Configuración", CONFIG_TEXT_DISPLAY[fase]),
+        ("Peso Bruto", f"{PESO_MAX_LBS} lbs (MAX)"),
+        ("Elev. Campo / QNH", f"{r['elevacion_campo']:.0f} ft  /  {r['qnh']:.2f} inHg"),
+        ("Altitud de Presión", f"{r['alt']:.0f} ft"),
+        ("Temperatura OAT", f"{r['temp']} °C"),
+        ("Pista en Uso", f"{r['rwy']:.0f}  (Eje {int(r['rwy']*10)}°)"),
+        ("Superficie", r['sup']),
+        ("Viento", f"{tipo_viento_txt} {abs(hw):.1f} kt | Cruzado {abs(cw):.1f} kt (Dir {r['dir_v']:.0f}° / {r['vel_v']:.0f} kt)"),
+    ]
+
+    pdf.set_font("Arial", '', 7.5)
+    for etiqueta, valor in campos:
+        pdf.set_x(x)
+        pdf.set_font("Arial", 'B', 8)
+        pdf.cell(ancho * 0.34, 6, etiqueta, border=1)
+        _cell_texto_ajustado(pdf, ancho * 0.66, 6, str(valor))
+
+    # Desglose condensado de correcciones aplicadas
+    pdf.set_x(x)
+    pdf.set_font("Arial", 'I', 7)
+    desglose = (
+        f"Base interpolada: GR {r['gr_base']:.1f} m / Total {r['total_base']:.1f} m.  "
+        f"Viento: GR {r['gr_base']:.1f} {operador} {abs(r['val_v_gr']):.1f} = {r['gr_viento']:.1f} m."
+    )
+    if r['sup'] == "Pasto Seco":
+        if fase == "Despegue":
+            desglose += f"  Pasto seco: GR x1.15 = {r['gr_final']:.1f} m (Total sin corrección)."
+        else:
+            desglose += f"  Pasto seco: +{r['diff_pasto']:.1f} m a ambas distancias."
+    pdf.multi_cell(ancho, 4, desglose, border=1)
+
+    pdf.set_x(x)
+    pdf.set_font("Arial", 'B', 10)
+    pdf.cell(ancho, 7, f"DIST. DE {nombre_fase} / LONG. DE PISTA", border=1, align='C', ln=True)
+
+    pdf.set_x(x)
+    pdf.set_font("Arial", 'B', 8)
+    pdf.cell(ancho * 0.5, 7, "Carrera en Tierra", border=1, align='C')
+    pdf.cell(ancho * 0.5, 7, "Total (Franqueo 50 FT)", border=1, align='C', ln=True)
+
+    pdf.set_x(x)
+    pdf.set_font("Arial", 'B', 15)
+    pdf.cell(ancho * 0.5, 12, f"{r['gr_final']:.0f} m", border=1, align='C')
+    pdf.cell(ancho * 0.5, 12, f"{r['total_final']:.0f} m", border=1, align='C', ln=True)
+
+
+def generar_pdf_combinado(res_despegue, res_aterrizaje):
+    """Genera una sola hoja en horizontal con Despegue a la izquierda y Aterrizaje a la
+    derecha. La fase que no haya sido calculada se marca con 'NO CALCULADO' en rojo.
+    """
+    pdf = FPDF(orientation='L', unit='mm', format='A4')
+    pdf.set_auto_page_break(auto=False)
     pdf.add_page()
-    pdf.set_left_margin(20)
-    pdf.set_right_margin(20)
+    pdf.set_left_margin(12)
+    pdf.set_right_margin(12)
+
+    fecha_actual = datetime.now().strftime("%Y-%m-%d %H:%M")
+    titulo = f"PLANILLA DE RENDIMIENTO - CESSNA 210 (PESO MAX. {PESO_MAX_LBS} LBS)"
 
     if os.path.exists(IMG_PATH):
-        pdf.image(IMG_PATH, x=20, y=10, w=40)
-        pdf.set_xy(65, 12)
+        pdf.image(IMG_PATH, x=12, y=8, w=26)
+        pdf.set_xy(42, 10)
         pdf.set_font("Arial", 'B', 15)
-        pdf.cell(0, 8, f"PLANILLA DE {fase.upper()} - CESSNA 210", ln=True)
-        pdf.set_x(65)
-        pdf.set_font("Arial", '', 10)
-        fecha_actual = datetime.now().strftime("%Y-%m-%d %H:%M")
-        pdf.cell(0, 6, f"| Fecha de emision: {fecha_actual}", ln=True)
-        pdf.ln(12)
-    else:
-        pdf.set_font("Arial", 'B', 16)
-        pdf.cell(0, 10, f"PLANILLA DE {fase.upper()} - CESSNA 210", ln=True, align='C')
-        pdf.set_font("Arial", '', 10)
-        fecha_actual = datetime.now().strftime("%Y-%m-%d %H:%M")
-        pdf.cell(0, 10, f"Fecha de emision: {fecha_actual}", ln=True, align='C')
-        pdf.ln(10)
-
-    # 1. Condiciones
-    pdf.set_font("Arial", 'B', 11)
-    pdf.cell(0, 8, f"1. CONDICIONES APLICADAS (PESO MAX. {PESO_MAX_LBS} LBS)", ln=True)
-    pdf.set_font("Arial", '', 9)
-    texto_condiciones = (
-        f"- Configuración: {CONFIG_TEXT_DISPLAY[fase]}\n"
-        f"- Elevación de Campo: {elevacion_campo:.0f} ft | QNH: {qnh:.2f} inHg "
-        f"-> Altitud de Presión calculada: {alt:.0f} pies.\n"
-        f"- Temperatura OAT: {temp} °C.\n"
-        f"- Pista en uso: {rwy} (Eje {int(rwy*10)}°) | Superficie: {sup}.\n"
-        f"- Viento: {tipo_viento_txt} de {abs(hw):.1f} kt (Dir: {dir_v}°, Vel: {vel_v} kt, Cruzado: {abs(cw):.1f} kt)."
-    )
-    pdf.multi_cell(0, 5, texto_condiciones)
-    pdf.ln(5)
-
-    # 2. Interpolación Base
-    pdf.set_font("Arial", 'B', 11)
-    pdf.cell(0, 8, "2. INTERPOLACION BASE (Temperatura y Elevación)", ln=True)
-    pdf.set_font("Arial", 'I', 8)
-    pdf.cell(0, 5, "Valores base extraídos de la tabla. El valor señalado en rojo indica el punto exacto interpolado.", ln=True)
-    pdf.ln(3)
-    enc_gr, fil_gr = m_gr
-    pdf_agregar_tabla(pdf, "Carrera en Tierra Base (m)", enc_gr, fil_gr)
-    enc_tot, fil_tot = m_tot
-    pdf_agregar_tabla(pdf, "Distancia Total 50FT Base (m)", enc_tot, fil_tot)
-
-    # 3. Efecto del Viento
-    pdf.set_font("Arial", 'B', 11)
-    pdf.cell(0, 8, "3. CORRECCION ARITMETICA POR EFECTO DE VIENTO", ln=True)
-    pdf.set_font("Arial", '', 9)
-    operador = "-" if hw >= 0 else "+"
-    txt_v_gr = f"Carrera en Tierra: {gr_b:.1f} {operador} ({abs(porc_v_gr):.1f}% de {gr_b:.1f} = {abs(val_v_gr):.1f}) = {gr_v:.1f} m"
-    txt_v_tot = f"Distancia Total 50FT: {tot_b:.1f} {operador} ({abs(porc_v_tot):.1f}% de {tot_b:.1f} = {abs(val_v_tot):.1f}) = {tot_v:.1f} m"
-    pdf.multi_cell(0, 5, f"- Componente: {tipo_viento_txt} de {abs(hw):.1f} kt.\n- {txt_v_gr}\n- {txt_v_tot}")
-    pdf.ln(5)
-
-    # 4. Efecto de Superficie
-    if sup == "Pasto Seco":
-        pdf.set_font("Arial", 'B', 11)
-        pdf.cell(0, 8, "4. CORRECCION ARITMETICA POR TIPO DE SUPERFICIE (PASTO SECO)", ln=True)
+        pdf.cell(0, 8, titulo, ln=True)
+        pdf.set_x(42)
         pdf.set_font("Arial", '', 9)
-        if fase == "Despegue":
-            txt_pasto = (
-                f"- Carrera en tierra con viento aplicado: {gr_v:.1f} m\n"
-                f"- Incremento reglamentario (+15% multiplicativo sobre Ground Roll): {gr_v:.1f} x 1.15 = {gr_f:.1f} m\n"
-                f"- Distancia Total 50FT: sin corrección por superficie según el manual = {tot_f:.1f} m"
-            )
-        else:
-            txt_pasto = (
-                f"- Carrera en tierra base obtenida de la tabla: {gr_b:.1f} m\n"
-                f"- Incremento reglamentario (40% de la carrera en tierra): 40% de {gr_b:.1f} = +{diff_pasto:.1f} m\n"
-                f"- Carrera en Tierra final: {gr_v:.1f} + {diff_pasto:.1f} = {gr_f:.1f} m\n"
-                f"- Distancia Total final: {tot_v:.1f} + {diff_pasto:.1f} = {tot_f:.1f} m"
-            )
-        pdf.multi_cell(0, 5, txt_pasto)
-        pdf.ln(5)
+        pdf.cell(0, 6, f"Fecha de emision: {fecha_actual}", ln=True)
+    else:
+        pdf.set_font("Arial", 'B', 15)
+        pdf.cell(0, 9, titulo, ln=True, align='C')
+        pdf.set_font("Arial", '', 9)
+        pdf.cell(0, 6, f"Fecha de emision: {fecha_actual}", ln=True, align='C')
 
-    # 5. Resultados Finales
-    pdf.set_font("Arial", 'B', 11)
-    pdf.cell(0, 8, f"5. RESULTADOS FINALES DE {fase.upper()}", ln=True)
-    pdf.set_font("Arial", 'B', 12)
-    pdf.cell(0, 8, f"CARRERA EN TIERRA (Ground Roll): {gr_f:.1f} metros", ln=True)
-    pdf.cell(0, 8, f"DISTANCIA TOTAL (Franqueo 50FT): {tot_f:.1f} metros", ln=True)
+    pdf.ln(4)
+    y_inicio = pdf.get_y()
 
-    return pdf.output(dest="S").encode("latin-1")
+    ancho_pagina = pdf.w - pdf.l_margin - pdf.r_margin
+    hueco = 8
+    ancho_col = (ancho_pagina - hueco) / 2
+    x_izq = pdf.l_margin
+    x_der = pdf.l_margin + ancho_col + hueco
+
+    _dibujar_bloque_fase(pdf, "DESPEGUE", "Despegue", res_despegue, x_izq, y_inicio, ancho_col)
+    _dibujar_bloque_fase(pdf, "ATERRIZAJE", "Aterrizaje", res_aterrizaje, x_der, y_inicio, ancho_col)
+
+    # Firma
+    pdf.set_y(-25)
+    pdf.set_font("Arial", '', 10)
+    pdf.cell(80, 8, "_" * 35, ln=True)
+    pdf.cell(80, 6, "COMANDANTE DE NAVE", ln=True)
+
+    salida_pdf = pdf.output(dest="S")
+    # Compatibilidad: fpdf clásico devuelve str (requiere encode); fpdf2 reciente ya devuelve bytes/bytearray.
+    if isinstance(salida_pdf, str):
+        return salida_pdf.encode("latin-1")
+    return bytes(salida_pdf)
 
 
 # ==========================================
@@ -397,11 +428,10 @@ def generar_pdf(fase, alt, temp, dir_v, vel_v, rwy, sup, r):
 # ==========================================
 st.set_page_config(page_title="Rendimiento C210", page_icon="✈️", layout="wide")
 
-if 'calculado' not in st.session_state:
-    st.session_state.calculado = False
-    st.session_state.resultados = {}
+if 'res_despegue' not in st.session_state:
+    st.session_state.res_despegue = None
+    st.session_state.res_aterrizaje = None
     st.session_state.pdf_bytes = None
-    st.session_state.fase_calculada = None
 
 col_img, col_title = st.columns([1, 4])
 with col_img:
@@ -411,139 +441,160 @@ with col_title:
     st.title("Calculadora de Rendimiento - Cessna 210")
     st.markdown("**Grupo Aéreo Mixto | Sección Operaciones**")
 
-fase = st.radio(
-    "¿Qué fase quieres planificar primero?",
-    ["Despegue", "Aterrizaje"],
-    horizontal=True,
-)
+st.divider()
 
-with st.form("formulario_vuelo"):
-    st.markdown(f"**Condiciones de Ingreso ({fase})**")
-    col1, col2, col3 = st.columns(3)
 
-    with col1:
-        elevacion_campo = st.number_input("Elevación del Campo (pies)", min_value=0.0, max_value=9000.0, value=1371.0, step=10.0)
-        qnh = st.number_input("Ajuste Altimétrico QNH (inHg)", min_value=27.50, max_value=31.50, value=29.92, step=0.01)
-
-    with col2:
-        temperatura = st.number_input("Temperatura Exterior (°C)", min_value=0.0, max_value=40.0, value=30.0, step=1.0)
-        superficie = st.selectbox("Superficie de Pista", ["Asfalto / Pista Seca", "Pasto Seco"])
-
-    with col3:
-        dir_viento = st.number_input("Dirección del Viento (°)", min_value=0.0, max_value=360.0, value=330.0, step=10.0)
-        vel_viento = st.number_input("Intensidad del Viento (kt)", min_value=0.0, max_value=50.0, value=12.0, step=1.0)
-        rumbo_pista = st.number_input("Rumbo de Pista en uso (1-36)", min_value=1.0, max_value=36.0, value=34.0, step=1.0)
-
-    submit = st.form_submit_button(f"Calcular Rendimiento de {fase}", use_container_width=True)
-
-if submit:
-    altitud_presion = calcular_altitud_presion(elevacion_campo, qnh)
-    resultado = calcular_resultado(fase, altitud_presion, temperatura, dir_viento, vel_viento, rumbo_pista, superficie)
-
-    if "error" in resultado:
-        st.error(f"⚠️ {resultado['error']} (Altitud de presión calculada: {altitud_presion:.0f} ft)")
-        st.session_state.calculado = False
-    else:
-        if resultado.get("advertencia_viento"):
-            st.warning(f"⚠️ {resultado['advertencia_viento']}")
-
-        resultado['elevacion_campo'] = elevacion_campo
-        resultado['qnh'] = qnh
-
-        st.session_state.resultados = resultado
-        st.session_state.fase_calculada = fase
-        st.session_state.pdf_bytes = generar_pdf(
-            fase, altitud_presion, temperatura, dir_viento, vel_viento, rumbo_pista, superficie, resultado
+def renderizar_formulario_fase(fase, key_prefix):
+    """Dibuja el formulario de una fase (con widgets de key propia) y devuelve
+    (submit, elevacion_campo, qnh, temperatura, superficie, dir_viento, vel_viento, rumbo_pista)."""
+    with st.form(f"formulario_{key_prefix}"):
+        elevacion_campo = st.number_input(
+            "Elevación del Campo (pies)", min_value=0.0, max_value=9000.0, value=1371.0, step=10.0,
+            key=f"elev_{key_prefix}"
         )
-        st.session_state.calculado = True
+        qnh = st.number_input(
+            "Ajuste Altimétrico QNH (inHg)", min_value=27.50, max_value=31.50, value=29.92, step=0.01,
+            key=f"qnh_{key_prefix}"
+        )
+        temperatura = st.number_input(
+            "Temperatura Exterior (°C)", min_value=0.0, max_value=40.0, value=30.0, step=1.0,
+            key=f"temp_{key_prefix}"
+        )
+        superficie = st.selectbox(
+            "Superficie de Pista", ["Asfalto / Pista Seca", "Pasto Seco"],
+            key=f"sup_{key_prefix}"
+        )
+        dir_viento = st.number_input(
+            "Dirección del Viento (°)", min_value=0.0, max_value=360.0, value=330.0, step=10.0,
+            key=f"dirv_{key_prefix}"
+        )
+        vel_viento = st.number_input(
+            "Intensidad del Viento (kt)", min_value=0.0, max_value=50.0, value=12.0, step=1.0,
+            key=f"velv_{key_prefix}"
+        )
+        rumbo_pista = st.number_input(
+            "Rumbo de Pista en uso (1-36)", min_value=1.0, max_value=36.0, value=34.0, step=1.0,
+            key=f"rwy_{key_prefix}"
+        )
+        submit = st.form_submit_button(f"Calcular {fase}", use_container_width=True)
 
-# ==========================================
-# 6. MOSTRAR RESULTADOS EN WEB
-# ==========================================
-if st.session_state.calculado:
-    fase_r = st.session_state.fase_calculada
-    res = st.session_state.resultados
-    st.divider()
+    return submit, elevacion_campo, qnh, temperatura, superficie, dir_viento, vel_viento, rumbo_pista
 
-    # 1. CONDICIONES APLICADAS
-    st.subheader(f"1. Condiciones Aplicadas al {fase_r}")
+
+def renderizar_resultados_fase(fase, res):
+    """Muestra el desglose completo (condiciones, interpolación, correcciones, resultado final)
+    de una fase ya calculada, en el ancho de la columna donde se invoque."""
     hw_val = res['headwind']
     cw_val = res['crosswind']
     tipo_v_str = "Viento frontal" if hw_val >= 0 else "Viento de cola"
+    operador = "-" if hw_val >= 0 else "+"
 
     st.info(f"""
-    * **Configuración Aeronave:** {CONFIG_TEXT_DISPLAY[fase_r]}
-    * **Elevación y QNH:** Elevación de campo **{res['elevacion_campo']:.0f} ft** con QNH **{res['qnh']:.2f} inHg** → Altitud de Presión calculada: **{res['alt']:.0f} pies**.
-    * **Temperatura:** OAT de **{res['temp']} °C**.
-    * **Pista y Superficie:** Pista en uso **{res['rwy']}** (Eje `{int(res['rwy']*10)}°`) con superficie de **{res['sup']}**.
-    * **Viento Aplicado:** {tipo_v_str} de **{abs(hw_val):.1f} nudos** (Dirección: {res['dir_v']}°, Intensidad: {res['vel_v']} kt, Cruzado: {abs(cw_val):.1f} kt).
+    * **Configuración:** {CONFIG_TEXT_DISPLAY[fase]}
+    * **Elev. Campo / QNH:** {res['elevacion_campo']:.0f} ft / {res['qnh']:.2f} inHg → **Altitud de Presión: {res['alt']:.0f} ft**
+    * **Temperatura:** {res['temp']} °C
+    * **Pista / Superficie:** {res['rwy']:.0f} (Eje {int(res['rwy']*10)}°) / {res['sup']}
+    * **Viento:** {tipo_v_str} {abs(hw_val):.1f} kt | Cruzado {abs(cw_val):.1f} kt (Dir {res['dir_v']:.0f}° / {res['vel_v']:.0f} kt)
     """)
 
-    st.divider()
+    with st.expander("Ver interpolación base y desglose de correcciones"):
+        enc_gr, fil_gr = res['m_gr']
+        enc_tot, fil_tot = res['m_tot']
 
-    # 2. INTERPOLACIÓN BASE
-    st.subheader("2. Interpolación Base (Temperatura y Elevación)")
-    st.markdown("Valores base extraídos de la tabla. El valor resaltado en **rojo** indica el punto exacto interpolado:")
-
-    t_col1, t_col2 = st.columns(2)
-    enc_gr, fil_gr = res['m_gr']
-    enc_tot, fil_tot = res['m_tot']
-
-    with t_col1:
         st.markdown("**Carrera en Tierra Base (m)**")
         st.markdown(render_html_table(enc_gr, fil_gr), unsafe_allow_html=True)
-
-    with t_col2:
         st.markdown("**Distancia Total 50FT Base (m)**")
         st.markdown(render_html_table(enc_tot, fil_tot), unsafe_allow_html=True)
 
-    st.divider()
+        st.markdown(f"""
+        **Corrección por Viento**
+        * Carrera en Tierra: `{res['gr_base']:.1f}` {operador} `{abs(res['val_v_gr']):.1f}` = **`{res['gr_viento']:.1f} m`**
+        * Distancia Total: `{res['total_base']:.1f}` {operador} `{abs(res['val_v_tot']):.1f}` = **`{res['total_viento']:.1f} m`**
+        """)
 
-    # 3. EFECTO DEL VIENTO
-    st.subheader("3. Corrección Aritmética por Efecto de Viento")
-    operador = "-" if hw_val >= 0 else "+"
-    st.markdown(f"""
-    * **Componente aplicada:** {tipo_v_str} de `{abs(hw_val):.1f} kt`.
-    * **Desglose en Carrera en Tierra:** `{res['gr_base']:.1f} m` {operador} (`{abs(res['porc_v_gr']):.1f}%` de `{res['gr_base']:.1f}` = `{abs(res['val_v_gr']):.1f} m`) = **`{res['gr_viento']:.1f} m`**
-    * **Desglose en Distancia Total (50 ft):** `{res['total_base']:.1f} m` {operador} (`{abs(res['porc_v_tot']):.1f}%` de `{res['total_base']:.1f}` = `{abs(res['val_v_tot']):.1f} m`) = **`{res['total_viento']:.1f} m`**
-    """)
+        if res['sup'] == "Pasto Seco":
+            if fase == "Despegue":
+                st.markdown(f"""
+                **Corrección por Superficie (Pasto Seco)**
+                * Carrera en Tierra x1.15 = **`{res['gr_final']:.1f} m`** (Distancia Total sin corrección)
+                """)
+            else:
+                st.markdown(f"""
+                **Corrección por Superficie (Pasto Seco)**
+                * +{res['diff_pasto']:.1f} m a ambas distancias → Carrera en Tierra **`{res['gr_final']:.1f} m`**, Total **`{res['total_final']:.1f} m`**
+                """)
 
-    # 4. EFECTO DE SUPERFICIE
-    if res['sup'] == "Pasto Seco":
-        st.divider()
-        st.subheader("4. Corrección Aritmética por Tipo de Superficie (Pasto Seco)")
-        if fase_r == "Despegue":
-            st.markdown(f"""
-            * **Carrera en tierra con viento aplicado:** `{res['gr_viento']:.1f} m`.
-            * **Incremento reglamentario (+15% multiplicativo sobre Ground Roll):** `{res['gr_viento']:.1f} x 1.15` = **`{res['gr_final']:.1f} m`**.
-            * **Distancia Total (50FT):** sin corrección por superficie según el manual = **`{res['total_final']:.1f} m`**.
-            """)
+    m1, m2 = st.columns(2)
+    with m1:
+        st.metric("Carrera en Tierra", f"{res['gr_final']:.1f} m")
+    with m2:
+        st.metric("Total (50 FT)", f"{res['total_final']:.1f} m")
+
+
+col_desp, col_ate = st.columns(2)
+
+with col_desp:
+    st.subheader("✈️ Despegue")
+    submit_d, elev_d, qnh_d, temp_d, sup_d, dirv_d, velv_d, rwy_d = renderizar_formulario_fase("Despegue", "desp")
+
+    if submit_d:
+        pa_d = calcular_altitud_presion(elev_d, qnh_d)
+        resultado_d = calcular_resultado("Despegue", pa_d, temp_d, dirv_d, velv_d, rwy_d, sup_d)
+
+        if "error" in resultado_d:
+            st.error(f"⚠️ {resultado_d['error']} (Altitud de presión calculada: {pa_d:.0f} ft)")
         else:
-            st.markdown(f"""
-            * **Carrera en tierra base obtenida de la tabla:** `{res['gr_base']:.1f} m`.
-            * **Cálculo del 40% reglamentario (sobre Ground Roll):** `40% de {res['gr_base']:.1f} = +{res['diff_pasto']:.1f} m`.
-            * **Operación final (Carrera en Tierra):** `{res['gr_viento']:.1f} + {res['diff_pasto']:.1f}` = **`{res['gr_final']:.1f} m`**.
-            * **Operación final (Distancia Total):** `{res['total_viento']:.1f} + {res['diff_pasto']:.1f}` = **`{res['total_final']:.1f} m`**.
-            """)
+            if resultado_d.get("advertencia_viento"):
+                st.warning(f"⚠️ {resultado_d['advertencia_viento']}")
+            resultado_d['elevacion_campo'] = elev_d
+            resultado_d['qnh'] = qnh_d
+            st.session_state.res_despegue = resultado_d
 
-    st.divider()
+    if st.session_state.res_despegue is not None:
+        renderizar_resultados_fase("Despegue", st.session_state.res_despegue)
 
-    # 5. RESULTADOS FINALES
-    st.subheader(f"5. Resultados Finales de {fase_r}")
-    res_col1, res_col2 = st.columns(2)
+with col_ate:
+    st.subheader("🛬 Aterrizaje")
+    submit_a, elev_a, qnh_a, temp_a, sup_a, dirv_a, velv_a, rwy_a = renderizar_formulario_fase("Aterrizaje", "ate")
 
-    with res_col1:
-        st.metric(f"Carrera de {fase_r} Final (Ground Roll)", f"{res['gr_final']:.1f} m")
-    with res_col2:
-        st.metric("Distancia Total Final (50 FT)", f"{res['total_final']:.1f} m")
+    if submit_a:
+        pa_a = calcular_altitud_presion(elev_a, qnh_a)
+        resultado_a = calcular_resultado("Aterrizaje", pa_a, temp_a, dirv_a, velv_a, rwy_a, sup_a)
 
-    st.divider()
+        if "error" in resultado_a:
+            st.error(f"⚠️ {resultado_a['error']} (Altitud de presión calculada: {pa_a:.0f} ft)")
+        else:
+            if resultado_a.get("advertencia_viento"):
+                st.warning(f"⚠️ {resultado_a['advertencia_viento']}")
+            resultado_a['elevacion_campo'] = elev_a
+            resultado_a['qnh'] = qnh_a
+            st.session_state.res_aterrizaje = resultado_a
 
-    # Botón de Descarga
+    if st.session_state.res_aterrizaje is not None:
+        renderizar_resultados_fase("Aterrizaje", st.session_state.res_aterrizaje)
+
+# ==========================================
+# 6. DESCARGA COMBINADA (PDF horizontal)
+# ==========================================
+st.divider()
+
+despegue_ok = st.session_state.res_despegue is not None
+aterrizaje_ok = st.session_state.res_aterrizaje is not None
+
+if despegue_ok or aterrizaje_ok:
+    st.session_state.pdf_bytes = generar_pdf_combinado(st.session_state.res_despegue, st.session_state.res_aterrizaje)
+
+    st.caption(
+        f"Estado de la planilla combinada — Despegue: {'✅ calculado' if despegue_ok else '❌ no calculado'} "
+        f"| Aterrizaje: {'✅ calculado' if aterrizaje_ok else '❌ no calculado'}"
+    )
+
     st.download_button(
-        label="📥 Descargar Reporte Desglosado en PDF",
+        label="📥 Descargar Planilla Combinada (Despegue + Aterrizaje, PDF horizontal)",
         data=st.session_state.pdf_bytes,
-        file_name=f"{fase_r}_C210_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
+        file_name=f"Rendimiento_C210_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
         mime="application/pdf",
         use_container_width=True
     )
+else:
+    st.caption("Calcula al menos una fase (Despegue o Aterrizaje) para habilitar la descarga combinada.")
