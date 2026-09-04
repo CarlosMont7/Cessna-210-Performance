@@ -13,15 +13,12 @@ PESO_MAX_LBS = 3800
 # Ajuste altimétrico estándar (inHg)
 QNH_ESTANDAR_INHG = 29.92
 
-# Texto de configuración de aeronave para cada fase.
-# El de "Aterrizaje" viene de tu script original (app_landing_c210.py).
-# El de "Despegue" queda como PLACEHOLDER porque tu script de consola
-# (cessna210_takeoff.py) no incluía esta configuración explícita:
-# complétalo con flaps / potencia / Vr según el POH antes de usarlo
-# en vuelo real.
+# Texto de configuración de aeronave para cada fase, según el POH.
+# Sin velocidades (Vr / velocidad de aterrizaje): varían con viento y peso,
+# así que no se muestran como un valor fijo.
 CONFIG_TEXT_DISPLAY = {
-    "Despegue": "[COMPLETAR SEGÚN POH] Flaps__°, Pot. Máxima, Vr__KIAS.",
-    "Aterrizaje": "Flaps 30°, Motor Cortado, Frenado Máximo, App 71 KIAS.",
+    "Despegue": "Flaps 10°, Potencia Máxima.",
+    "Aterrizaje": "Flaps 30°, Potencia Idle (Ralentí), Frenado Máximo.",
 }
 
 # ==========================================
@@ -162,7 +159,7 @@ def obtener_matriz_respaldo(alt, temp, matriz):
 
     filas = []
     for a in a_vals:
-        fila = [f"{a} ft"]
+        fila = [f"{a:.0f} ft"]
         for t in t_vals:
             val = interpolar_bilineal(a, t, matriz)
             if a == alt and t == temp:
@@ -189,29 +186,39 @@ def render_html_table(encabezado, filas):
     return html
 
 
-def pdf_agregar_tabla(pdf, titulo, encabezado, filas):
-    pdf.set_font("Arial", 'B', 10)
-    pdf.cell(0, 8, titulo, ln=True)
-    pdf.set_font("Arial", 'B', 9)
-    w = [35] + [30] * (len(encabezado) - 1)
+def pdf_agregar_tabla(pdf, x, ancho_total, titulo, encabezado, filas, alto_fila=5):
+    """Dibuja una mini-tabla de respaldo (interpolación) posicionada en x, con ancho fijo.
+    Pensada para caber dentro de media hoja horizontal (columna de una fase)."""
+    n_cols = len(encabezado)
+    w_label = ancho_total * 0.30
+    w_col = (ancho_total - w_label) / (n_cols - 1)
+    anchos = [w_label] + [w_col] * (n_cols - 1)
+
+    pdf.set_x(x)
+    pdf.set_font("Arial", 'B', 8)
+    pdf.cell(ancho_total, 5, titulo, ln=True)
+
+    pdf.set_x(x)
+    pdf.set_font("Arial", 'B', 7)
     for i, header in enumerate(encabezado):
-        pdf.cell(w[i], 8, header, border=1, align='C')
+        pdf.cell(anchos[i], alto_fila, header, border=1, align='C')
     pdf.ln()
-    pdf.set_font("Arial", '', 9)
+
     for fila in filas:
+        pdf.set_x(x)
         for i, val in enumerate(fila):
             clean_val = val.replace("<span style='color:red; font-weight:bold;'>", "").replace("</span>", "")
             if "color:red" in val:
                 pdf.set_text_color(200, 0, 0)
-                pdf.set_font("Arial", 'B', 9)
+                pdf.set_font("Arial", 'B', 7)
             else:
                 pdf.set_text_color(0, 0, 0)
-                pdf.set_font("Arial", '', 9)
-            pdf.cell(w[i], 8, clean_val, border=1, align='C')
+                pdf.set_font("Arial", '', 7)
+            pdf.cell(anchos[i], alto_fila, clean_val, border=1, align='C')
         pdf.ln()
+
     pdf.set_text_color(0, 0, 0)
-    pdf.set_font("Arial", '', 9)
-    pdf.ln(5)
+    pdf.set_font("Arial", '', 8)
 
 
 # ==========================================
@@ -289,7 +296,7 @@ def calcular_resultado(fase, altitud, temperatura, dir_viento, vel_viento, rumbo
 # ==========================================
 # 4. GENERACIÓN DE PDF COMBINADO (Despegue + Aterrizaje en una sola hoja horizontal)
 # ==========================================
-ALTURA_BLOQUE_VACIO = 92  # mm — alto de referencia para la caja "NO CALCULADO"
+ALTURA_BLOQUE_VACIO = 154  # mm — alto de referencia para la caja "NO CALCULADO" (incluye tablas de respaldo)
 
 
 def _cell_texto_ajustado(pdf, ancho, alto, texto, tam_max=7.5, tam_min=5.5):
@@ -342,6 +349,19 @@ def _dibujar_bloque_fase(pdf, nombre_fase, fase, r, x, y, ancho):
         pdf.cell(ancho * 0.34, 6, etiqueta, border=1)
         _cell_texto_ajustado(pdf, ancho * 0.66, 6, str(valor))
 
+    # Interpolación base (respaldo): valores reales de la tabla del manual usados para interpolar
+    pdf.set_x(x)
+    pdf.set_font("Arial", 'BI', 7)
+    pdf.cell(ancho, 4, "Respaldo: interpolación sobre la tabla del manual (valor exacto en rojo)", ln=True)
+    enc_gr, fil_gr = r['m_gr']
+    enc_tot, fil_tot = r['m_tot']
+    pdf_agregar_tabla(pdf, x, ancho, "Carrera en Tierra Base (m)", enc_gr, fil_gr)
+    pdf.set_x(x)
+    pdf.ln(1)
+    pdf_agregar_tabla(pdf, x, ancho, "Distancia Total 50FT Base (m)", enc_tot, fil_tot)
+    pdf.set_x(x)
+    pdf.ln(2)
+
     # Desglose condensado de correcciones aplicadas
     pdf.set_x(x)
     pdf.set_font("Arial", 'I', 7)
@@ -384,19 +404,22 @@ def generar_pdf_combinado(res_despegue, res_aterrizaje):
     fecha_actual = datetime.now().strftime("%Y-%m-%d %H:%M")
     titulo = f"PLANILLA DE RENDIMIENTO - CESSNA 210 (PESO MAX. {PESO_MAX_LBS} LBS)"
 
+    ancho_util = pdf.w - pdf.l_margin - pdf.r_margin
+
     if os.path.exists(IMG_PATH):
         pdf.image(IMG_PATH, x=12, y=8, w=26)
-        pdf.set_xy(42, 10)
+        pdf.set_y(10)
+        pdf.set_x(pdf.l_margin)
         pdf.set_font("Arial", 'B', 15)
-        pdf.cell(0, 8, titulo, ln=True)
-        pdf.set_x(42)
+        pdf.cell(ancho_util, 8, titulo, align='C', ln=True)
+        pdf.set_x(pdf.l_margin)
         pdf.set_font("Arial", '', 9)
-        pdf.cell(0, 6, f"Fecha de emision: {fecha_actual}", ln=True)
+        pdf.cell(ancho_util, 6, f"Fecha de emision: {fecha_actual}", align='C', ln=True)
     else:
         pdf.set_font("Arial", 'B', 15)
-        pdf.cell(0, 9, titulo, ln=True, align='C')
+        pdf.cell(ancho_util, 9, titulo, ln=True, align='C')
         pdf.set_font("Arial", '', 9)
-        pdf.cell(0, 6, f"Fecha de emision: {fecha_actual}", ln=True, align='C')
+        pdf.cell(ancho_util, 6, f"Fecha de emision: {fecha_actual}", ln=True, align='C')
 
     pdf.ln(4)
     y_inicio = pdf.get_y()
@@ -410,11 +433,14 @@ def generar_pdf_combinado(res_despegue, res_aterrizaje):
     _dibujar_bloque_fase(pdf, "DESPEGUE", "Despegue", res_despegue, x_izq, y_inicio, ancho_col)
     _dibujar_bloque_fase(pdf, "ATERRIZAJE", "Aterrizaje", res_aterrizaje, x_der, y_inicio, ancho_col)
 
-    # Firma
+    # Firma (centrada en la parte inferior de la hoja)
     pdf.set_y(-25)
+    ancho_pagina_util = pdf.w - pdf.l_margin - pdf.r_margin
     pdf.set_font("Arial", '', 10)
-    pdf.cell(80, 8, "_" * 35, ln=True)
-    pdf.cell(80, 6, "COMANDANTE DE NAVE", ln=True)
+    pdf.set_x(pdf.l_margin)
+    pdf.cell(ancho_pagina_util, 8, "_" * 35, align='C', ln=True)
+    pdf.set_x(pdf.l_margin)
+    pdf.cell(ancho_pagina_util, 6, "COMANDANTE DE NAVE", align='C', ln=True)
 
     salida_pdf = pdf.output(dest="S")
     # Compatibilidad: fpdf clásico devuelve str (requiere encode); fpdf2 reciente ya devuelve bytes/bytearray.
